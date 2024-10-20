@@ -13,10 +13,6 @@ import (
 
 	"github.com/getsops/sops/v3"
 	"github.com/getsops/sops/v3/age"
-	"github.com/getsops/sops/v3/azkv"
-	"github.com/getsops/sops/v3/gcpkms"
-	"github.com/getsops/sops/v3/hcvault"
-	"github.com/getsops/sops/v3/kms"
 	"github.com/getsops/sops/v3/logging"
 	"github.com/getsops/sops/v3/pgp"
 	"github.com/getsops/sops/v3/publish"
@@ -95,54 +91,20 @@ type configFile struct {
 
 type keyGroup struct {
 	Merge   []keyGroup
-	KMS     []kmsKey
-	GCPKMS  []gcpKmsKey  `yaml:"gcp_kms"`
-	AzureKV []azureKVKey `yaml:"azure_keyvault"`
-	Vault   []string     `yaml:"hc_vault"`
 	Age     []string     `yaml:"age"`
 	PGP     []string
 }
 
-type gcpKmsKey struct {
-	ResourceID string `yaml:"resource_id"`
-}
-
-type kmsKey struct {
-	Arn        string             `yaml:"arn"`
-	Role       string             `yaml:"role,omitempty"`
-	Context    map[string]*string `yaml:"context"`
-	AwsProfile string             `yaml:"aws_profile"`
-}
-
-type azureKVKey struct {
-	VaultURL string `yaml:"vaultUrl"`
-	Key      string `yaml:"key"`
-	Version  string `yaml:"version"`
-}
-
 type destinationRule struct {
 	PathRegex        string       `yaml:"path_regex"`
-	S3Bucket         string       `yaml:"s3_bucket"`
-	S3Prefix         string       `yaml:"s3_prefix"`
-	GCSBucket        string       `yaml:"gcs_bucket"`
-	GCSPrefix        string       `yaml:"gcs_prefix"`
-	VaultPath        string       `yaml:"vault_path"`
-	VaultAddress     string       `yaml:"vault_address"`
-	VaultKVMountName string       `yaml:"vault_kv_mount_name"`
-	VaultKVVersion   int          `yaml:"vault_kv_version"`
 	RecreationRule   creationRule `yaml:"recreation_rule,omitempty"`
 	OmitExtensions   bool         `yaml:"omit_extensions"`
 }
 
 type creationRule struct {
 	PathRegex               string `yaml:"path_regex"`
-	KMS                     string
-	AwsProfile              string `yaml:"aws_profile"`
 	Age                     string `yaml:"age"`
 	PGP                     string
-	GCPKMS                  string     `yaml:"gcp_kms"`
-	AzureKeyVault           string     `yaml:"azure_keyvault"`
-	VaultURI                string     `yaml:"hc_vault_transit_uri"`
 	KeyGroups               []keyGroup `yaml:"key_groups"`
 	ShamirThreshold         int        `yaml:"shamir_threshold"`
 	UnencryptedSuffix       string     `yaml:"unencrypted_suffix"`
@@ -225,26 +187,10 @@ func extractMasterKeys(group keyGroup) (sops.KeyGroup, error) {
 	for _, k := range group.PGP {
 		keyGroup = append(keyGroup, pgp.NewMasterKeyFromFingerprint(k))
 	}
-	for _, k := range group.KMS {
-		keyGroup = append(keyGroup, kms.NewMasterKeyWithProfile(k.Arn, k.Role, k.Context, k.AwsProfile))
-	}
-	for _, k := range group.GCPKMS {
-		keyGroup = append(keyGroup, gcpkms.NewMasterKeyFromResourceID(k.ResourceID))
-	}
-	for _, k := range group.AzureKV {
-		keyGroup = append(keyGroup, azkv.NewMasterKey(k.VaultURL, k.Key, k.Version))
-	}
-	for _, k := range group.Vault {
-		if masterKey, err := hcvault.NewMasterKeyFromURI(k); err == nil {
-			keyGroup = append(keyGroup, masterKey)
-		} else {
-			return nil, err
-		}
-	}
 	return deduplicateKeygroup(keyGroup), nil
 }
 
-func getKeyGroupsFromCreationRule(cRule *creationRule, kmsEncryptionContext map[string]*string) ([]sops.KeyGroup, error) {
+func getKeyGroupsFromCreationRule(cRule *creationRule) ([]sops.KeyGroup, error) {
 	var groups []sops.KeyGroup
 	if len(cRule.KeyGroups) > 0 {
 		for _, group := range cRule.KeyGroups {
@@ -269,26 +215,6 @@ func getKeyGroupsFromCreationRule(cRule *creationRule, kmsEncryptionContext map[
 		for _, k := range pgp.MasterKeysFromFingerprintString(cRule.PGP) {
 			keyGroup = append(keyGroup, k)
 		}
-		for _, k := range kms.MasterKeysFromArnString(cRule.KMS, kmsEncryptionContext, cRule.AwsProfile) {
-			keyGroup = append(keyGroup, k)
-		}
-		for _, k := range gcpkms.MasterKeysFromResourceIDString(cRule.GCPKMS) {
-			keyGroup = append(keyGroup, k)
-		}
-		azureKeys, err := azkv.MasterKeysFromURLs(cRule.AzureKeyVault)
-		if err != nil {
-			return nil, err
-		}
-		for _, k := range azureKeys {
-			keyGroup = append(keyGroup, k)
-		}
-		vaultKeys, err := hcvault.NewMasterKeysFromURIs(cRule.VaultURI)
-		if err != nil {
-			return nil, err
-		}
-		for _, k := range vaultKeys {
-			keyGroup = append(keyGroup, k)
-		}
 		groups = append(groups, keyGroup)
 	}
 	return groups, nil
@@ -308,7 +234,7 @@ func loadConfigFile(confPath string) (*configFile, error) {
 	return conf, nil
 }
 
-func configFromRule(rule *creationRule, kmsEncryptionContext map[string]*string) (*Config, error) {
+func configFromRule(rule *creationRule) (*Config, error) {
 	cryptRuleCount := 0
 	if rule.UnencryptedSuffix != "" {
 		cryptRuleCount++
@@ -333,7 +259,7 @@ func configFromRule(rule *creationRule, kmsEncryptionContext map[string]*string)
 		return nil, fmt.Errorf("error loading config: cannot use more than one of encrypted_suffix, unencrypted_suffix, encrypted_regex, unencrypted_regex, encrypted_comment_regex, or unencrypted_comment_regex for the same rule")
 	}
 
-	groups, err := getKeyGroupsFromCreationRule(rule, kmsEncryptionContext)
+	groups, err := getKeyGroupsFromCreationRule(rule)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +277,7 @@ func configFromRule(rule *creationRule, kmsEncryptionContext map[string]*string)
 	}, nil
 }
 
-func parseDestinationRuleForFile(conf *configFile, filePath string, kmsEncryptionContext map[string]*string) (*Config, error) {
+func parseDestinationRuleForFile(conf *configFile, filePath string) (*Config, error) {
 	var rule *creationRule
 	var dRule *destinationRule
 
@@ -377,22 +303,8 @@ func parseDestinationRuleForFile(conf *configFile, filePath string, kmsEncryptio
 	}
 
 	var dest publish.Destination
-	if dRule != nil {
-		if dRule.S3Bucket != "" && dRule.GCSBucket != "" && dRule.VaultPath != "" {
-			return nil, fmt.Errorf("error loading config: more than one destinations were found in a single destination rule, you can only use one per rule")
-		}
-		if dRule.S3Bucket != "" {
-			dest = publish.NewS3Destination(dRule.S3Bucket, dRule.S3Prefix)
-		}
-		if dRule.GCSBucket != "" {
-			dest = publish.NewGCSDestination(dRule.GCSBucket, dRule.GCSPrefix)
-		}
-		if dRule.VaultPath != "" {
-			dest = publish.NewVaultDestination(dRule.VaultAddress, dRule.VaultPath, dRule.VaultKVMountName, dRule.VaultKVVersion)
-		}
-	}
 
-	config, err := configFromRule(rule, kmsEncryptionContext)
+	config, err := configFromRule(rule)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +314,7 @@ func parseDestinationRuleForFile(conf *configFile, filePath string, kmsEncryptio
 	return config, nil
 }
 
-func parseCreationRuleForFile(conf *configFile, confPath, filePath string, kmsEncryptionContext map[string]*string) (*Config, error) {
+func parseCreationRuleForFile(conf *configFile, confPath, filePath string) (*Config, error) {
 	// If config file doesn't contain CreationRules (it's empty or only contains DestionationRules), assume it does not exist
 	if conf.CreationRules == nil {
 		return nil, nil
@@ -437,7 +349,7 @@ func parseCreationRuleForFile(conf *configFile, confPath, filePath string, kmsEn
 		return nil, fmt.Errorf("error loading config: no matching creation rules found")
 	}
 
-	config, err := configFromRule(rule, kmsEncryptionContext)
+	config, err := configFromRule(rule)
 	if err != nil {
 		return nil, err
 	}
@@ -448,23 +360,23 @@ func parseCreationRuleForFile(conf *configFile, confPath, filePath string, kmsEn
 // LoadCreationRuleForFile load the configuration for a given SOPS file from the config file at confPath. A kmsEncryptionContext
 // should be provided for configurations that do not contain key groups, as there's no way to specify context inside
 // a SOPS config file outside of key groups.
-func LoadCreationRuleForFile(confPath string, filePath string, kmsEncryptionContext map[string]*string) (*Config, error) {
+func LoadCreationRuleForFile(confPath string, filePath string) (*Config, error) {
 	conf, err := loadConfigFile(confPath)
 	if err != nil {
 		return nil, err
 	}
 
-	return parseCreationRuleForFile(conf, confPath, filePath, kmsEncryptionContext)
+	return parseCreationRuleForFile(conf, confPath, filePath)
 }
 
 // LoadDestinationRuleForFile works the same as LoadCreationRuleForFile, but gets the "creation_rule" from the matching destination_rule's
 // "recreation_rule".
-func LoadDestinationRuleForFile(confPath string, filePath string, kmsEncryptionContext map[string]*string) (*Config, error) {
+func LoadDestinationRuleForFile(confPath string, filePath string) (*Config, error) {
 	conf, err := loadConfigFile(confPath)
 	if err != nil {
 		return nil, err
 	}
-	return parseDestinationRuleForFile(conf, filePath, kmsEncryptionContext)
+	return parseDestinationRuleForFile(conf, filePath)
 }
 
 func LoadStoresConfig(confPath string) (*StoresConfig, error) {
