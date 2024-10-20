@@ -47,7 +47,7 @@ func Run(opts Opts) error {
 		return err
 	}
 
-	conf, err := config.LoadDestinationRuleForFile(opts.ConfigPath, opts.InputPath, make(map[string]*string))
+	conf, err := config.LoadDestinationRuleForFile(opts.ConfigPath, opts.InputPath)
 	if err != nil {
 		return err
 	}
